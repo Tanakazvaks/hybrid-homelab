@@ -1,0 +1,44 @@
+groups:
+  - name: homelab
+    rules:
+      - alert: HostDown
+        expr: up{job=~"linux|windows"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host }} is down"
+          description: "Prometheus has not reached {{ $labels.host }} ({{ $labels.instance }}) for over 1 minute."
+
+      - alert: DiskSpaceLow
+        expr: >
+          (100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 80)
+          or
+          (100 * (1 - windows_logical_disk_free_bytes{volume="C:"} / windows_logical_disk_size_bytes{volume="C:"}) > 80)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} disk is {{ $value | printf \"%.1f\" }}% full"
+
+      - alert: HighMemory
+        expr: >
+          (100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90)
+          or
+          (100 * (1 - windows_memory_physical_free_bytes / windows_memory_physical_total_bytes) > 90)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} memory is {{ $value | printf \"%.1f\" }}% used"
+
+      - alert: HighCPU
+        expr: >
+          (100 * (1 - avg by (host) (rate(node_cpu_seconds_total{mode="idle"}[2m]))) > 90)
+          or
+          (100 * (1 - avg by (host) (rate(windows_cpu_time_seconds_total{mode="idle"}[2m]))) > 90)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} CPU is {{ $value | printf \"%.1f\" }}% busy"
