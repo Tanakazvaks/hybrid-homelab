@@ -1,3 +1,4 @@
 *.retry
 .vault_pass
 reports/
+monitoring/.env

@@ -1,0 +1,24 @@
+---
+- name: Install Docker on the monitoring server
+  hosts: monitoring
+  become: true
+
+  tasks:
+    - name: Install Docker and the Compose plugin
+      ansible.builtin.apt:
+        name: [docker.io, docker-compose-v2]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure Docker is running and starts on boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Let the admin user run Docker without sudo
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
