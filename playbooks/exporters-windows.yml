@@ -1,0 +1,41 @@
+---
+- name: Install Prometheus windows_exporter on Windows servers
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+    - name: Look up the latest windows_exporter release on GitHub
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/prometheus-community/windows_exporter/releases/latest
+        return_content: true
+      register: release
+      delegate_to: localhost
+      run_once: true
+
+    - name: Pick the 64-bit MSI download link
+      ansible.builtin.set_fact:
+        msi_url: "{{ release.json.assets | selectattr('name', 'search', 'amd64\\.msi$') | map(attribute='browser_download_url') | first }}"
+        exporter_version: "{{ release.json.tag_name }}"
+
+    - name: Install windows_exporter {{ exporter_version }}
+      ansible.windows.win_package:
+        path: "{{ msi_url }}"
+        state: present
+        creates_service: windows_exporter
+
+    - name: Ensure windows_exporter is running and set to automatic
+      ansible.windows.win_service:
+        name: windows_exporter
+        state: started
+        start_mode: auto
+
+    - name: Firewall - allow Prometheus to scrape from LabNet
+      community.windows.win_firewall_rule:
+        name: Prometheus windows_exporter
+        localport: 9182
+        protocol: tcp
+        direction: in
+        action: allow
+        remoteip: 10.10.10.0/24
+        state: present
+        enabled: true

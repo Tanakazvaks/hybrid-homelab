@@ -1,0 +1,32 @@
+---
+- name: Install Prometheus node_exporter on Linux servers
+  hosts: linux
+  become: true
+
+  tasks:
+    - name: Install node_exporter
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure node_exporter is running and starts on boot
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+    - name: Firewall - allow Prometheus to scrape from LabNet
+      community.general.ufw:
+        rule: allow
+        port: "9100"
+        proto: tcp
+        src: 10.10.10.0/24
+
+    - name: Firewall - allow scraping from the Docker network on the monitoring host
+      community.general.ufw:
+        rule: allow
+        port: "9100"
+        proto: tcp
+        src: 172.16.0.0/12
