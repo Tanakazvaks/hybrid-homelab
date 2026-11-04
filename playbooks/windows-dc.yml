@@ -1,0 +1,61 @@
+---
+- name: Windows DC - roles, services, scripts, health check
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    script_dir: 'C:\Scripts'
+    dc_features: [AD-Domain-Services, DNS, DHCP, RSAT-AD-PowerShell]
+    dc_services: [NTDS, DNS, DHCPServer, Netlogon, Kdc, W32Time]
+    scripts: [New-LabUsers.ps1, Get-ServerHealth.ps1]
+
+  tasks:
+    - name: Ensure domain controller roles are installed
+      ansible.windows.win_feature:
+        name: "{{ dc_features }}"
+        state: present
+
+    - name: Ensure critical services are running and set to automatic
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: started
+        start_mode: auto
+      loop: "{{ dc_services }}"
+
+    - name: Ensure script folders exist
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - 'C:\Scripts'
+        - 'C:\Scripts\Logs'
+        - 'C:\Scripts\Reports'
+
+    - name: Deploy PowerShell scripts from Git
+      ansible.windows.win_copy:
+        src: "{{ playbook_dir }}/../scripts/{{ item }}"
+        dest: 'C:\Scripts\{{ item }}'
+      loop: "{{ scripts }}"
+
+    - name: Run server health check
+      ansible.windows.win_shell: .\Get-ServerHealth.ps1
+      args:
+        chdir: 'C:\Scripts'
+      register: health
+      changed_when: false
+
+    - name: Show health summary
+      ansible.builtin.debug:
+        var: health.stdout_lines
+
+    - name: Find the newest HTML report
+      ansible.windows.win_find:
+        paths: 'C:\Scripts\Reports'
+        patterns: ['Health_*.html']
+      register: reports
+
+    - name: Copy the newest report back to the Ansible server
+      ansible.builtin.fetch:
+        src: "{{ (reports.files | sort(attribute='lastwritetime') | last).path }}"
+        dest: "{{ playbook_dir }}/../reports/"
+        flat: true
