@@ -1,0 +1,57 @@
+---
+- name: Join Linux servers to Active Directory (homelab.local)
+  hosts: linux
+  become: true
+
+  vars:
+    ad_domain: homelab.local
+    ad_join_user: Administrator
+    ad_sudo_group: linuxadmins@homelab.local
+
+  vars_prompt:
+    - name: ad_join_password
+      prompt: "AD Administrator password (only used if a server is not joined yet)"
+      private: true
+
+  tasks:
+    - name: Install AD integration packages
+      ansible.builtin.apt:
+        name: [realmd, sssd, sssd-tools, libnss-sss, libpam-sss, adcli, samba-common-bin, oddjob, oddjob-mkhomedir, packagekit, krb5-user]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Check current domain membership
+      ansible.builtin.command: realm list --name-only
+      register: realm_status
+      changed_when: false
+
+    - name: Join the domain (skipped if already joined)
+      ansible.builtin.command: "realm join -U {{ ad_join_user }} {{ ad_domain }}"
+      args:
+        stdin: "{{ ad_join_password }}"
+      no_log: true
+      when: ad_domain not in realm_status.stdout
+
+    - name: Check if home-directory creation is enabled
+      ansible.builtin.command: grep -q pam_mkhomedir /etc/pam.d/common-session
+      register: mkhomedir_check
+      changed_when: false
+      failed_when: false
+
+    - name: Enable automatic home directories for AD users
+      ansible.builtin.command: pam-auth-update --enable mkhomedir
+      when: mkhomedir_check.rc != 0
+
+    - name: Grant sudo to the AD LinuxAdmins group
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/linuxadmins
+        content: "%{{ ad_sudo_group }} ALL=(ALL:ALL) ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Ensure SSSD is running and enabled
+      ansible.builtin.service:
+        name: sssd
+        state: started
+        enabled: true

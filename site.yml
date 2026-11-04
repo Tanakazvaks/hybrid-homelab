@@ -1,0 +1,3 @@
+---
+- import_playbook: playbooks/linux-baseline.yml
+- import_playbook: playbooks/linux-domain-join.yml
