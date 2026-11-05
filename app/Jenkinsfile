@@ -1,0 +1,73 @@
+// CI/CD pipeline for homelab-web: build -> test -> push -> rolling deploy -> verify (auto-rollback on failure)
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        REGISTRY = '10.10.10.21:5000'
+        IMAGE    = "${REGISTRY}/homelab-web:${BUILD_NUMBER}"
+        APP_URL  = 'http://10.10.10.22:30080'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                dir('app') {
+                    sh 'docker build --build-arg APP_VERSION=${BUILD_NUMBER} -t ${IMAGE} .'
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'docker run --rm ${IMAGE} python -m unittest -v'
+            }
+        }
+
+        stage('Push') {
+            steps {
+                sh 'docker push ${IMAGE}'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                withCredentials([file(credentialsId: 'k8s-deployer-kubeconfig', variable: 'KUBECONFIG')]) {
+                    script { env.DEPLOYED = 'true' }
+                    sh '''
+                        sed "s|__IMAGE__|${IMAGE}|" app/k8s/deployment.yaml | kubectl apply -f -
+                        kubectl -n apps annotate deployment/homelab-web kubernetes.io/change-cause="Jenkins build ${BUILD_NUMBER}" --overwrite
+                        kubectl -n apps rollout status deployment/homelab-web --timeout=120s
+                    '''
+                }
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh '''
+                    for i in $(seq 1 10); do
+                        if curl -fsS ${APP_URL}/ | grep -q "\\"version\\": \\"${BUILD_NUMBER}\\""; then
+                            echo "Version ${BUILD_NUMBER} is live"
+                            exit 0
+                        fi
+                        sleep 3
+                    done
+                    echo "Version ${BUILD_NUMBER} is not serving traffic"
+                    exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                // Only roll back if this build actually touched the cluster
+                if (env.DEPLOYED == 'true') {
+                    withCredentials([file(credentialsId: 'k8s-deployer-kubeconfig', variable: 'KUBECONFIG')]) {
