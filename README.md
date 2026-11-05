@@ -140,3 +140,82 @@ ansible-playbook playbooks/windows-dc.yml --ask-vault-pass
 - Prometheus + Grafana monitoring stack with node_exporter and windows_exporter
 - Kubernetes (kubeadm) cluster with a Jenkins CI/CD pipeline
 - Ansible roles + Molecule tests; Windows hardening baseline playbook
+---
+
+## Part 2: Monitoring, Alerting & Performance Tuning
+
+Prometheus and Grafana run in Docker on lnx01 and monitor every server in the lab: node_exporter on the 3 Ubuntu servers and windows_exporter on the domain controller. Alert rules catch outages and overloads, and fio benchmarks were used to tune disk I/O with measured before/after results.
+
+### Results
+
+- **4/4 hosts monitored** (3 Linux + 1 Windows) at 15-second intervals, with dashboards and datasource provisioned as code
+- **HostDown alert** fired within 1 minute of a server going offline and **cleared automatically** when it recovered
+- **Disk I/O tuning: +40% IOPS** (3,048 → 4,282) and **~30% lower latency** (10.4 ms → 7.5 ms) on 4K random read/write
+- **HighCPU alert** went pending → firing after 5 minutes at 100% CPU (stress-ng) and resolved on its own afterwards
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph LNX01["lnx01 (Docker)"]
+        P[Prometheus :9090] --> G[Grafana :3000]
+    end
+    P -- scrape :9100 --> N1[lnx01 node_exporter]
+    P -- scrape :9100 --> N2[lnx02 node_exporter]
+    P -- scrape :9100 --> N3[lnx03 node_exporter]
+    P -- scrape :9182 --> W[dc01 windows_exporter]
+    P -- evaluates --> A[alerts.yml]
+```
+
+### What was added
+
+| File | Purpose |
+|---|---|
+| `playbooks/docker.yml` | Installs Docker + Compose on the monitoring server |
+| `playbooks/exporters-linux.yml` | Installs node_exporter, opens UFW only to LabNet and the Docker network |
+| `playbooks/exporters-windows.yml` | Downloads the latest windows_exporter MSI, installs it over WinRM, adds a firewall rule |
+| `playbooks/disk-tuning.yml` | Sets the `none` I/O scheduler via a persistent udev rule |
+| `monitoring/docker-compose.yml` | Prometheus + Grafana stack with persistent volumes |
+| `monitoring/prometheus/prometheus.yml` | Scrape targets with host/os/role labels |
+| `monitoring/prometheus/alerts.yml` | HostDown, DiskSpaceLow, HighMemory, HighCPU rules |
+| `monitoring/grafana/provisioning/` | Datasource and Homelab Overview dashboard as code |
+
+### Performance tuning
+
+Tested on lnx03 with fio (4K blocks, 70% read / 30% write, queue depth 32, direct I/O, 60 s per run).
+
+| Scheduler | Read IOPS | Write IOPS | Total IOPS | Avg read latency |
+|---|---|---|---|---|
+| mq-deadline (default), run 1 | 2,135 | 913 | 3,048 | 10.4 ms |
+| mq-deadline (default), run 2 | 2,065 | 884 | 2,949 | 10.8 ms |
+| **none (tuned)** | **2,996** | **1,286** | **4,282** | **7.5 ms** |
+
+The disks are virtual, and VirtualBox and the host OS already schedule the physical I/O, so the guest-level `mq-deadline` scheduler was a redundant second layer. The baseline was run twice to confirm the gain wasn't noise, then the change was rolled out to all Linux servers with Ansible.
+
+### Challenges
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Community Windows dashboard showed N/A everywhere | windows_exporter v0.32 renamed its metrics | Built and provisioned a custom dashboard using the new metric names |
+| Prometheus couldn't scrape lnx01's own exporter | Container traffic comes from the Docker network (172.16.0.0/12), not LabNet | Added a scoped UFW rule for the Docker subnet |
+| HostDown kept firing after lnx02 came back | lnx02 was offline when the exporter playbook ran, so node_exporter was never installed | Re-ran the playbook with `--limit lnx02` |
+| lnx01 ran low on disk for Docker images | Ubuntu installer only allocated half the volume group | Grew the root LV online with `lvextend -r -l +100%FREE` |
+
+### How to run
+
+```bash
+ansible-playbook playbooks/docker.yml -K
+ansible-playbook playbooks/exporters-linux.yml -K
+ansible-playbook playbooks/exporters-windows.yml --ask-vault-pass
+ansible-playbook playbooks/disk-tuning.yml -K
+cd monitoring && docker compose up -d   # needs monitoring/.env with GRAFANA_ADMIN_PASSWORD
+```
+
+### Screenshots
+
+| | |
+|---|---|
+| ![Prometheus targets](screenshots/p2-01-prometheus-targets.png) Prometheus scrape targets | ![Grafana](screenshots/p2-02-grafana-linux.png) Grafana metrics |
+| ![HostDown firing](screenshots/p2-04-prometheus-alert-firing.png) HostDown firing for lnx02 | ![Alerts cleared](screenshots/p2-05-prometheus-alerts-cleared.png) Alert cleared after recovery |
+| ![All hosts up](screenshots/p2-06-all-hosts-up.png) Homelab Overview, all hosts up | ![Disk tuning](screenshots/p2-07-disk-tuning-ansible.png) Disk tuning rolled out with Ansible |
+| ![CPU stress](screenshots/p2-08-grafana-cpu-stress.png) lnx03 at 100% CPU under stress-ng | ![HighCPU history](screenshots/p2-09-highcpu-alert-history.png) HighCPU pending → firing → resolved |
