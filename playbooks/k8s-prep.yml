@@ -1,0 +1,137 @@
+- name: Prepare Kubernetes nodes (containerd + kubeadm)
+  hosts: k8s
+  become: true
+  vars:
+    k8s_version: "v1.37"
+    pod_cidr: "10.244.0.0/16"
+
+  tasks:
+    - name: Grow root filesystem into any free LVM space
+      ansible.builtin.shell: |
+        free=$(vgs --noheadings -o vg_free_count ubuntu-vg | tr -d ' ')
+        if [ "$free" -gt 0 ]; then lvextend -r -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && echo grew; fi
+      register: lv_grow
+      changed_when: "'grew' in lv_grow.stdout"
+
+    - name: Turn swap off now (kubelet requires it)
+      ansible.builtin.command: swapoff -a
+      when: ansible_facts['swaptotal_mb'] > 0
+
+    - name: Keep swap off after reboot
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '# \1'
+
+    - name: Load kernel modules on boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Load kernel modules now
+      ansible.builtin.command: "modprobe {{ item }}"
+      loop: [overlay, br_netfilter]
+      changed_when: false
+
+    - name: Kernel networking settings for Kubernetes
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+      notify: Apply sysctl
+
+    - name: Install containerd and prerequisites
+      ansible.builtin.apt:
+        name: [containerd, apt-transport-https, ca-certificates, curl, gpg]
+        state: present
+        update_cache: true
+
+    - name: Create containerd config directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Generate full containerd config if missing
+      ansible.builtin.shell: |
+        if ! grep -q SystemdCgroup /etc/containerd/config.toml 2>/dev/null; then
+          containerd config default > /etc/containerd/config.toml && echo generated
+        fi
+      register: ctr_cfg
+      changed_when: "'generated' in ctr_cfg.stdout"
+      notify: Restart containerd
+
+    - name: Use the systemd cgroup driver (must match kubelet)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+
+    - name: Ensure containerd is running and enabled
+      ansible.builtin.service:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Kubernetes apt signing key
+      ansible.builtin.shell: >
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key
+        | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/ /\n"
+
+    - name: Install kubelet, kubeadm and kubectl
+      ansible.builtin.apt:
+        name: [kubelet, kubeadm, kubectl]
+        state: present
+        update_cache: true
+
+    - name: Hold Kubernetes packages so auto-updates can't upgrade the cluster
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+
+    - name: Enable kubelet
+      ansible.builtin.service:
+        name: kubelet
+        enabled: true
+
+    - name: Firewall - allow all traffic between lab nodes
+      community.general.ufw:
+        rule: allow
+        src: 10.10.10.0/24
+
+    - name: Firewall - allow pod network traffic
+      community.general.ufw:
+        rule: allow
+        src: "{{ pod_cidr }}"
+
+    - name: Firewall - allow routed (forwarded) traffic for pods
+      community.general.ufw:
+        default: allow
+        direction: routed
+
+  handlers:
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl --system
+
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted

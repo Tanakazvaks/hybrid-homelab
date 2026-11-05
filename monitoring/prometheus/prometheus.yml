@@ -18,6 +18,8 @@ scrape_configs:
         labels: {host: lnx02, os: linux, role: member}
       - targets: ['10.10.10.23:9100']
         labels: {host: lnx03, os: linux, role: member}
+      - targets: ['10.10.10.24:9100']
+        labels: {host: k8s01, os: linux, role: k8s-control}
 
   - job_name: windows
     static_configs:
