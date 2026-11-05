@@ -71,3 +71,17 @@ pipeline {
                 // Only roll back if this build actually touched the cluster
                 if (env.DEPLOYED == 'true') {
                     withCredentials([file(credentialsId: 'k8s-deployer-kubeconfig', variable: 'KUBECONFIG')]) {
+                        sh '''
+                            echo "Deployment failed - rolling back to the previous version"
+                            kubectl -n apps rollout undo deployment/homelab-web
+                            kubectl -n apps rollout status deployment/homelab-web --timeout=120s
+                        '''
+                    }
+                }
+            }
+        }
+        always {
+            sh 'docker rmi ${IMAGE} || true'
+        }
+    }
+}
