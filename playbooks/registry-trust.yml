@@ -1,0 +1,50 @@
+- name: Trust the lab registry - Docker on the CI host
+  hosts: monitoring
+  become: true
+  tasks:
+    - name: Allow pushes to the lab registry over HTTP
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries": ["10.10.10.21:5000"]
+          }
+      notify: Restart docker
+
+  handlers:
+    - name: Restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+
+- name: Trust the lab registry - containerd on Kubernetes nodes
+  hosts: k8s
+  become: true
+  tasks:
+    - name: Create registry config directory
+      ansible.builtin.file:
+        path: /etc/containerd/certs.d/10.10.10.21:5000
+        state: directory
+
+    - name: Allow pulls from the lab registry over HTTP
+      ansible.builtin.copy:
+        dest: /etc/containerd/certs.d/10.10.10.21:5000/hosts.toml
+        content: |
+          server = "http://10.10.10.21:5000"
+
+          [host."http://10.10.10.21:5000"]
+            capabilities = ["pull", "resolve"]
+            skip_verify = true
+
+    - name: Point containerd at /etc/containerd/certs.d (default config leaves it empty)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: "config_path = ''"
+        replace: "config_path = '/etc/containerd/certs.d'"
+      notify: Restart containerd
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
