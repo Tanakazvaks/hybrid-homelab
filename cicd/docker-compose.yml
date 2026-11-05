@@ -1,0 +1,28 @@
+services:
+  jenkins:
+    build: ./jenkins
+    image: homelab/jenkins:lts
+    container_name: jenkins
+    restart: unless-stopped
+    environment:
+      - JAVA_OPTS=-Xmx768m
+    group_add:
+      - "${DOCKER_GID}"          # lets Jenkins use the host's Docker to build images
+    ports:
+      - "8080:8080"
+    volumes:
+      - jenkins-home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  registry:
+    image: registry:3
+    container_name: registry
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+
+volumes:
+  jenkins-home:
+  registry-data:
