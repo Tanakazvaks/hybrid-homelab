@@ -1,0 +1,62 @@
+# Applied by Jenkins on every build. __IMAGE__ is replaced with the image built by the pipeline.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homelab-web
+  namespace: apps
+  labels:
+    app: homelab-web
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5            # keep old versions so we can roll back
+  selector:
+    matchLabels:
+      app: homelab-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0              # never drop below 3 healthy pods during an update
+      maxSurge: 1                    # add one new pod at a time
+  template:
+    metadata:
+      labels:
+        app: homelab-web
+    spec:
+      containers:
+        - name: web
+          image: __IMAGE__
+          ports:
+            - containerPort: 8000
+          readinessProbe:            # only send traffic to pods that answer /health
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:             # restart a pod that stops answering
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homelab-web
+  namespace: apps
+spec:
+  type: NodePort
+  selector:
+    app: homelab-web
+  ports:
+    - port: 80
+      targetPort: 8000
+      nodePort: 30080
