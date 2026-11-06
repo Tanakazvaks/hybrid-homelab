@@ -219,3 +219,107 @@ cd monitoring && docker compose up -d   # needs monitoring/.env with GRAFANA_ADM
 | ![HostDown firing](screenshots/p2-04-prometheus-alert-firing.png) HostDown firing for lnx02 | ![Alerts cleared](screenshots/p2-05-prometheus-alerts-cleared.png) Alert cleared after recovery |
 | ![All hosts up](screenshots/p2-06-all-hosts-up.png) Homelab Overview, all hosts up | ![Disk tuning](screenshots/p2-07-disk-tuning-ansible.png) Disk tuning rolled out with Ansible |
 | ![CPU stress](screenshots/p2-08-grafana-cpu-stress.png) lnx03 at 100% CPU under stress-ng | ![HighCPU history](screenshots/p2-09-highcpu-alert-history.png) HighCPU pending → firing → resolved |
+---
+
+## Part 3: Kubernetes Cluster & Jenkins CI/CD
+
+A 3-node Kubernetes v1.37 cluster built with kubeadm and Ansible, plus a Jenkins pipeline that builds, tests and deploys a containerized app with zero-downtime rolling updates and automatic rollback.
+
+### Results
+
+- **3-node Kubernetes v1.37 cluster** (1 control plane, 2 workers), with all nodes prepared by one Ansible playbook in 7 minutes
+- **Commit to live in 2 min 40 sec**: checkout, build, test, push, rolling deploy, verify
+- **Zero downtime**: 360 live requests during a rolling update, **0 failed**
+- **Automatic rollback**: a broken release that passed unit tests failed its readiness probe, the pipeline rolled it back, and 480 live requests saw **0 failures**
+- **Least privilege**: Jenkins deploys with its own ServiceAccount, limited to the `apps` namespace
+
+### Architecture
+
+```mermaid
+flowchart LR
+    GH[GitHub repo] -->|checkout| J
+    subgraph LNX01["lnx01 (Docker)"]
+        J[Jenkins] -->|docker push| R[Registry :5000]
+        P[Prometheus] --> G[Grafana]
+    end
+    J -->|kubectl apply<br/>apps namespace only| CP
+    subgraph K8S["Kubernetes v1.37"]
+        CP[k8s01 control plane]
+        W1[lnx02 worker]
+        W2[lnx03 worker]
+    end
+    R -->|image pull| W1
+    R -->|image pull| W2
+    P -->|node_exporter| K8S
+```
+
+### Pipeline (`app/Jenkinsfile`)
+
+| Stage | What it does | Time (build #1) |
+|---|---|---|
+| Checkout | Pulls the repo from GitHub | 4s |
+| Build | Builds the image, tagged with the build number | 22s |
+| Test | Runs the unit tests inside the built image; stops on failure | 8s |
+| Push | Pushes the image to the lab registry | 5s |
+| Deploy | Applies the manifest with the new image and waits for the rollout | 39s |
+| Verify | Polls the app until the new version answers | 0.8s |
+| On failure | `kubectl rollout undo`, but only if the build reached the cluster | – |
+
+Rollout safety comes from `maxSurge: 1`, `maxUnavailable: 0`, a `/health` readiness probe (pods get no traffic until healthy) and `revisionHistoryLimit: 5`.
+
+### Rollout tests
+
+| Test | Live requests | Failed | Outcome |
+|---|---|---|---|
+| Rolling update v1 → v2 | 360 | **0** | Traffic shifted pod by pod over ~40s |
+| Broken release (wrong port, passed unit tests) | 480 | **0** | New pod never became ready; pipeline failed and rolled back |
+
+### What was added
+
+| File | Purpose |
+|---|---|
+| `playbooks/k8s-prep.yml` | Swap off, kernel modules and sysctl, containerd (systemd cgroups), kubeadm/kubelet/kubectl (held), firewall rules, LVM grow |
+| `playbooks/registry-trust.yml` | Trusts the lab registry in Docker (push) and containerd (pull) |
+| `playbooks/sssd-resilience.yml` | systemd drop-in so SSSD restarts itself if it crashes |
+| `cicd/docker-compose.yml` | Jenkins LTS and a private image registry |
+| `cicd/jenkins/Dockerfile` | Jenkins image with the docker CLI and kubectl added |
+| `app/app.py`, `app/test_app.py`, `app/Dockerfile` | Sample JSON web service, unit tests, non-root container image |
+| `app/Jenkinsfile` | The CI/CD pipeline (pipeline as code) |
+| `app/k8s/setup.yaml` | Namespace, Jenkins ServiceAccount and RoleBinding (applied once by an admin) |
+| `app/k8s/deployment.yaml` | Deployment (3 replicas, probes, rolling update) and NodePort Service |
+
+### Challenges
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Workers failed `kubeadm join` because kubelet never became healthy | kubelet looks up a `kubelet` user at startup; SSSD (the AD integration) had crashed, so the lookup returned "connection refused" instead of "not found" and kubelet exited | Restarted SSSD, then added a `Restart=on-failure` systemd drop-in to every Linux server with Ansible |
+| Re-join refused: "node already exists" | Once SSSD was fixed, kubelet recovered and registered on its own; my reset then left stale Node objects | Deleted the stale nodes, then `kubeadm reset` and re-join |
+| Cluster couldn't pull from the private registry | containerd 2.x ships with registry `config_path = ''` | Ansible sets `config_path` and a `hosts.toml` for the registry; verified with a test pod |
+| Jenkinsfile was truncated during editing | Long terminal paste cut off mid-file | Caught by checking `tail`/`wc -l` before running the job, and completed the file |
+
+### How to run
+
+```bash
+ansible-playbook playbooks/k8s-prep.yml -K
+# on k8s01:
+sudo kubeadm init --apiserver-advertise-address=10.10.10.24 --pod-network-cidr=10.244.0.0/16
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+# back on lnx01:
+ansible k8s_workers -b -K -m shell -a "kubeadm join 10.10.10.24:6443 --token <token> --discovery-token-ca-cert-hash <hash>"
+ansible-playbook playbooks/registry-trust.yml -K
+cd cicd && docker compose up -d --build
+ssh 10.10.10.24 kubectl apply -f - < app/k8s/setup.yaml
+# then add the deployer kubeconfig as a Jenkins "Secret file" credential (k8s-deployer-kubeconfig)
+# and create a Pipeline job pointing at app/Jenkinsfile
+```
+
+### Screenshots
+
+| | |
+|---|---|
+| ![k8s01 in Prometheus](screenshots/p3-01-prometheus-k8s01.png) k8s01 added to monitoring | ![Control plane](screenshots/p3-02-control-plane-ready.png) Control plane initialized |
+| ![Nodes ready](screenshots/p3-03-cluster-nodes-ready.png) 3 nodes Ready | ![Jenkins](screenshots/p3-05-jenkins-dashboard.png) Jenkins running |
+| ![Credential](screenshots/p3-06-jenkins-credential.png) Scoped deploy credential | ![Build 1](screenshots/p3-07-jenkins-build-1-success.png) First pipeline run: version 1 live |
+| ![Stages](screenshots/p3-08-jenkins-pipeline-stages.png) Pipeline stages and timings | ![Zero downtime](screenshots/p3-09-zero-downtime-rollout.png) Rolling update: 360 requests, 0 failed |
+| ![Bad release](screenshots/p3-10-bad-release-zero-impact.png) Broken release: 480 requests, 0 failed | ![Rollback](screenshots/p3-11-auto-rollback.png) Pipeline rolls back automatically |
+| ![Build history](screenshots/p3-12-jenkins-build-history.png) Build history: pass, pass, fail (rolled back), pass | ![Grafana](screenshots/p3-13-grafana-cluster-nodes.png) Cluster nodes in Grafana |
